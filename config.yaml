@@ -1,21 +1,22 @@
 #config.yaml
 
 paths:
-  moedl_address: './models/state-spaces_mamba-130m/'
-  store_adrress: './pruned_model'
+  model_address: ~/models/state-spaces/mamba-2.8b
+  store_address: ~/pruned_models
 params:
-  model_param: '2b'
+  model_param: 2.8b
   seed: 0
-  nsamepls: 64
+  nsamples: 32
   seqlen: 2048
   sparsity_ratio: 0.5
-  device_num: 'cuda: 3'
-  type: 'bfloat16'
+  device_num: 'cuda:3'
+  dtype: bfloat16
 prune:
-  prune_int_proj: True
+  prune_in_proj: True
   prune_conv1d: True
   prune_x_proj: True
   prune_dt_proj: True
-  prune_A_log: False
+  prune_A_log: True
   prune_out_proj: True
+  ssm_state: None
   prune_n: 0
