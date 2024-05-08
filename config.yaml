@@ -4,7 +4,7 @@ paths:
   moedl_address: './models/state-spaces_mamba-130m/'
   store_adrress: './pruned_model'
 params:
-  model_param: '130m'
+  model_param: '2b'
   seed: 0
   nsamepls: 64
   seqlen: 2048
