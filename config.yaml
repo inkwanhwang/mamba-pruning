@@ -1,10 +1,10 @@
 #config.yaml
 
 paths:
-  model_address: ~/models/state-spaces/mamba-2.8b
-  store_address: ~/pruned_models
+  model_address: ~/models/state-spaces/mamba-130m
+  store_address: ~/pruned_models/model
 params:
-  model_param: 2.8b
+  model_param: 130m
   seed: 0
   nsamples: 32
   seqlen: 2048

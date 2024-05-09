@@ -1,24 +1,16 @@
 import os
-
-# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
 from transformers import AutoTokenizer, MambaForCausalLM
 from mamba.mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
-# from datasets import load_dataset
-# import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from config import load_config
-
 import gc
 from mamba.mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
 from lib.data import get_loaders
 from pruner.wanda import wanda
-
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 except ImportError:
@@ -63,15 +55,17 @@ class TokenizerWrapper:
 
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
 if model_param != "7b":
-    model = MambaLMHeadModel.from_pretrained(os.path.expanduser(config.paths.model_address), device=device_num, dtype=dtype)
+    model = MambaLMHeadModel.from_pretrained(os.path.expanduser(config.paths.model_address), device_num, dtype)
 else:
     model = MambaForCausalLM.from_pretrained("tri-ml/mamba-7b-rw").bfloat16().to(device_num)
     
 device = torch.device(device_num)
 # Load and process c4 dataset
-dataloader, _ = get_loaders("c4",nsamples=nsamples,seed=seed,seqlen=seqlen,tokenizer=tokenizer)
+dataloader, _ = get_loaders("c4", nsamples, seed, seqlen, tokenizer)
 input_ids = dataloader.to(device)
 model_weights = model.state_dict()
+
+layer_num = (len(model_weights.keys()) - 3) / 10
 
 if model_param == "130m":
     layer_num = 24
@@ -93,19 +87,20 @@ elif model_param == "7b":
     d_model = 4096
 
 d_state = 16
-dt_rank = model_weights['backbone.layers.0.mixer.x_proj.weight'].shape[0] - d_state*2
+dt_rank = model_weights['backbone.layers.0.mixer.x_proj.weight'].shape[0] - d_state * 2
 d_inner = d_model * 2
 
-mixer_in_proj_weights = ['backbone.layers.{0}.mixer.in_proj.weight'.format(i) for i in range(layer_num)]
-mixer_out_proj_weights = ['backbone.layers.{0}.mixer.out_proj.weight'.format(i) for i in range(layer_num)]
-mixer_A_log_weights=['backbone.layers.{0}.mixer.A_log'.format(i) for i in range(layer_num)]         
-mixer_conv1d_weights=['backbone.layers.{0}.mixer.conv1d.weight'.format(i) for i in range (layer_num)]
-mixer_conv1d_bias=['backbone.layers.{0}.mixer.conv1d.bias'.format(i) for i in range (layer_num)]
-mixer_dt_proj_weights=['backbone.layers.{0}.mixer.dt_proj.weight'.format(i) for i in range(layer_num)]
-mixer_dt_proj_bias=['backbone.layers.{0}.mixer.dt_proj.bias'.format(i) for i in range(layer_num)]
-mixer_x_proj_weights=['backbone.layers.{0}.mixer.x_proj.weight'.format(i) for i in range(layer_num)]
-norm_weights = ['backbone.layers.{0}.norm.weight'.format(i) for i in range(layer_num)]
-mixer_D = ['backbone.layers.{0}.mixer.D'.format(i) for i in range(layer_num)]
+mixer_in_proj_weights = [model_weights[f'backbone.layers.{i}.mixer.in_proj.weight'] for i in range(layer_num)]
+mixer_out_proj_weights = [model_weights[f'backbone.layers.{i}.mixer.out_proj.weight'] for i in range(layer_num)]
+mixer_A_log_weights=[model_weights[f'backbone.layers.{i}.mixer.A_log'] for i in range(layer_num)]         
+mixer_conv1d_weights=[model_weights[f'backbone.layers.{i}.mixer.conv1d.weight'] for i in range (layer_num)]
+mixer_conv1d_bias=[model_weights[f'backbone.layers.{i}.mixer.conv1d.bias'] for i in range (layer_num)]
+mixer_dt_proj_weights=[model_weights[f'backbone.layers.{i}.mixer.dt_proj.weight'] for i in range(layer_num)]
+mixer_dt_proj_bias=[model_weights[f'backbone.layers.{i}.mixer.dt_proj.bias'] for i in range(layer_num)]
+mixer_x_proj_weights=[model_weights[f'backbone.layers.{i}.mixer.x_proj.weight'] for i in range(layer_num)]
+norm_weights = [model_weights[f'backbone.layers.{i}.norm.weight'] for i in range(layer_num)]
+mixer_D = [model_weights[f'backbone.layers.{i}.mixer.D'] for i in range(layer_num)]
+
 embedding_layer = nn.Embedding.from_pretrained(model_weights['backbone.embedding.weight']) if model_param != "7b" else nn.Embedding.from_pretrained(model_weights['backbone.embeddings.weight'])
 embedded_input = embedding_layer(input_ids)
 
@@ -117,59 +112,59 @@ for i in range(layer_num):
     with torch.no_grad():
         residual = hidden_state + prev_residual
 
-        norm_cls.weight = nn.Parameter(model_weights[norm_weights[i]])
+        norm_cls.weight = nn.Parameter(norm_weights[i])
         normalized_hidden_input = norm_cls(hidden_state)
 
         if prune_in_proj == True:
-            model_weights[mixer_in_proj_weights[i]] = wanda(rearrange(normalized_hidden_input,"b l d -> (b l) d"), model_weights[mixer_in_proj_weights[i]],sparsity_ratio, prune_n)
+            mixer_in_proj_weights[i] = wanda(rearrange(normalized_hidden_input,"b l d -> (b l) d"), mixer_in_proj_weights[i],sparsity_ratio, prune_n)
 
         gc.collect()
         torch.cuda.empty_cache()
 
-        xz = normalized_hidden_input @ model_weights[mixer_in_proj_weights[i]].T
+        xz = normalized_hidden_input @ mixer_in_proj_weights[i].T
         x, z = xz.chunk(2, dim=2)
 
-        model_weights[mixer_conv1d_weights[i]] = rearrange(model_weights[mixer_conv1d_weights[i]], "b l d -> (b l) d")
+        mixer_conv1d_weights[i] = rearrange(mixer_conv1d_weights[i], "b l d -> (b l) d")
         
         if prune_conv1d == True:
-            model_weights[mixer_conv1d_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[mixer_conv1d_weights[i]].T, sparsity_ratio, prune_n)
-            model_weights[mixer_conv1d_weights[i]] = model_weights[mixer_conv1d_weights[i]].T
+            mixer_conv1d_weights[i] = wanda(rearrange(x, "b l d -> (b l) d"), mixer_conv1d_weights[i].T, sparsity_ratio, prune_n)
+            mixer_conv1d_weights[i] = mixer_conv1d_weights[i].T
 
         gc.collect()
         torch.cuda.empty_cache()
 
         x = causal_conv1d_fn(
-            x=rearrange(x, "b l d -> b d l"),
-            weight=model_weights[mixer_conv1d_weights[i]],
-            bias=model_weights[mixer_conv1d_bias[i]],
+            x = rearrange(x, "b l d -> b d l"),
+            weight = mixer_conv1d_weights[i],
+            bias = mixer_conv1d_bias[i],
             activation="silu",
         )
         x = rearrange(x, "b d l -> b l d")
         if prune_x_proj == True:
-            model_weights[mixer_x_proj_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[mixer_x_proj_weights[i]], sparsity_ratio, prune_n)
+            mixer_x_proj_weights[i] = wanda(rearrange(x, "b l d -> (b l) d"), mixer_x_proj_weights[i], sparsity_ratio, prune_n)
         gc.collect()
         torch.cuda.empty_cache()
 
-        x_dbl = x @ model_weights[mixer_x_proj_weights[i]].T
+        x_dbl = x @ mixer_x_proj_weights[i].T
         dt, B, C = torch.split(x_dbl, [dt_rank, d_state, d_state], dim=-1)
 
         if prune_dt_proj == True:
-            model_weights[mixer_dt_proj_weights[i]] = wanda(rearrange(dt, "b l d -> (b l) d"), model_weights[mixer_dt_proj_weights[i]], sparsity_ratio, prune_n)
+            mixer_dt_proj_weights[i] = wanda(rearrange(dt, "b l d -> (b l) d"), mixer_dt_proj_weights[i], sparsity_ratio, prune_n)
         
         gc.collect()
         torch.cuda.empty_cache()
 
-        dt = dt @ model_weights[mixer_dt_proj_weights[i]].T
-        A = -torch.exp(model_weights[mixer_A_log_weights[i]].float())
+        dt = dt @ mixer_dt_proj_weights[i].T
+        A = -torch.exp(mixer_A_log_weights[i].float())
 
         if prune_A_log == True:
             dt_act = F.softplus(dt)
             A = wanda(rearrange(dt_act, "b l d -> (b l) d"), A.T, sparsity_ratio, prune_n, A=True)
             A = A.T
-            model_weights[mixer_A_log_weights[i]] = torch.log(-A)
+            mixer_A_log_weights[i] = torch.log(-A)
         dt = rearrange(dt, "b l d -> b d l", l=seqlen)
-        B = rearrange(B, "b l dstate -> b dstate l", l=seqlen).contiguous()
-        C = rearrange(C, "b l dstate -> b dstate l", l=seqlen).contiguous()
+        B = rearrange(B, "b l dstate -> b dstate l", l = seqlen).contiguous()
+        C = rearrange(C, "b l dstate -> b dstate l", l = seqlen).contiguous()
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -180,23 +175,23 @@ for i in range(layer_num):
             A,
             B,
             C,
-            model_weights[mixer_D[i]].float(),
+            mixer_D[i].float(),
             z=rearrange(z, "b l d -> b d l", l = seqlen),
-            delta_bias= model_weights[mixer_dt_proj_bias[i]].float(),
-            delta_softplus=True,
-            return_last_state=ssm_state is not None,
+            delta_bias = mixer_dt_proj_bias[i].float(),
+            delta_softplus = True,
+            return_last_state = ssm_state is not None,
         )
         y = rearrange(y, "b d l -> b l d")
         if prune_out_proj == True:
-            model_weights[mixer_out_proj_weights[i]] = wanda(rearrange(y,"b l d -> (b l) d"), model_weights[mixer_out_proj_weights[i]], sparsity_ratio, prune_n)
-        out = y @ model_weights[mixer_out_proj_weights[i]].T
+            mixer_out_proj_weights[i] = wanda(rearrange(y,"b l d -> (b l) d"), mixer_out_proj_weights[i], sparsity_ratio, prune_n)
+        out = y @ mixer_out_proj_weights[i].T
         hidden_state = out
         prev_residual = residual
 
         gc.collect()
         torch.cuda.empty_cache()
-        
-        print('layer {} pruning complete'.format(i))
+        print(f'layer {i} pruning complete', i)
 
 print("\nSaving model...")
 model.save_pretrained(os.path.expanduser(config.paths.store_address))
+print("\nPruned Successfully!")
