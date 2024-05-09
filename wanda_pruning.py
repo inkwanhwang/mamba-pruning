@@ -5,16 +5,22 @@ import os
 
 from transformers import AutoTokenizer, MambaForCausalLM
 from mamba.mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
-from datasets import load_dataset
-import random
+# from datasets import load_dataset
+# import random
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from config import load_config
+
 import gc
 from mamba.mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
+from lib.data import get_loaders
+
+import ipdb
+ipdb.set_trace()
+
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 except ImportError:
@@ -49,46 +55,14 @@ if dtype == "float32":
 elif dtype == "bfloat16":
     dtype = torch.bfloat16
 
-# Set seed for reproducibility
-def set_seed(seed):
-    np.random.seed(seed)
-    torch.random.manual_seed(seed)
+# Set seeds for reproducibility
+np.random.seed(seed)
+torch.random.manual_seed(seed)
 
 class TokenizerWrapper:
     def __init__(self, input_ids):
         self.input_ids = input_ids
 
-# Load and process c4 dataset
-def get_c4(nsamples, seed, seqlen, tokenizer):
-    # Load train and validation datasets
-    traindata = load_dataset('allenai/c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
-    valdata = load_dataset('allenai/c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation')
-
-    # Generate samples from training set
-    set_seed(seed)
-    trainloader = torch.LongTensor([])
-    for _ in range(nsamples):
-        while True:
-            i = random.randint(0, len(traindata) - 1)
-            trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
-            if trainenc.input_ids.shape[1] > seqlen:
-                break
-        i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        inp = trainenc.input_ids[:, i:j]
-        trainloader = torch.cat((trainloader, inp), dim=0)
-
-    # Prepare validation dataset
-    valenc = tokenizer(' '.join(valdata[:1100]['text']), return_tensors='pt')
-    valenc = valenc.input_ids[:, :(256 * seqlen)]
-    valenc = TokenizerWrapper(valenc)
-    return trainloader, valenc
-
-# Function to select the appropriate loader based on dataset name
-def get_loaders(name, nsamples=128, seed=0, seqlen=2048, tokenizer=None):
-    if "c4" in name:
-        return get_c4(nsamples, seed, seqlen, tokenizer)
-    
 def wanda(input_tensor, weight_tensor, sparsity_ratio, prune_n, A = False):
     prune_m = prune_n * 2
     result_tensor = weight_tensor
@@ -118,8 +92,9 @@ else:
     model = MambaForCausalLM.from_pretrained("tri-ml/mamba-7b-rw").bfloat16().to(device_num)
     
 device = torch.device(device_num)
-
-# c4 dataset
+import ipdb
+ipdb.set_trace()
+# Load and process c4 dataset
 print("loading calibdation data")
 dataloader, _ = get_loaders("c4",nsamples=nsamples,seed=seed,seqlen=seqlen,tokenizer=tokenizer)
 print("dataset loading complete")
