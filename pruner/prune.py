@@ -1,15 +1,18 @@
-class pruner:
-    def __init__(self, maskedParameter):
-        self.maskedParameter = list(maskedParameter)
+from .wanda import wanda
+from .sparsegpt import sparsegpt
+from .magnitude import mag
+
+magnitude = None
+
+class Pruner:
+    def __init__(self):
+        self.maskedParameter = list()
         self.scores = {}
         
-def loadPruner(method):
-    prune_method = {
-        'wanda' : wanda,
-        'wandaA' : wandaA,
-        'magnitude' : magnitude,
-        'magnitudeA' : magnitudeA,
-        'sparseGPT' : spraseGPT,
-        'sparseGPTA' : spraseGPTA
-    }
-    return prune_method[method]
+    def loadPruner(self, method):
+        prune_method = {
+            'wanda' : wanda,
+            'magnitude' : mag,
+            'sparsegpt' : sparsegpt
+        }
+        return prune_method[method]
