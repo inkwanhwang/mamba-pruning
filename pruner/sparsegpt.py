@@ -2,12 +2,13 @@
 
 import math
 import time
+import gc
 
 import torch
 import torch.nn as nn
 import transformers
 
-from quant import *
+# from quant import *
 
 
 DEBUG = False 
@@ -151,3 +152,110 @@ class SparseGPT:
             self.out1 = None
         self.H = None
         torch.cuda.empty_cache()
+
+
+def sparsegpt(input_tensor, weight_tensor, sparsity_ratio, prune_n, blocksize=128, percdamp=.01, device="cuda:3", A=False, dtype=torch.float32, nsamples=64):
+    prune_m = prune_n * 2
+
+    W = weight_tensor
+    _, columns = W.shape[0], W.shape[1]
+
+    H = torch.zeros(input_tensor.shape[1], input_tensor.shape[1]).to(device)
+    # if torch.isnan(input_tensor).any() == True:
+
+    #     print("Is there any NaN's in input_tensor?{}".format(torch.isnan(input_tensor).any()))
+    #     print(input_tensor)
+    # # tmp_H = torch.zeros(input_tensor.shape[1], input_tensor.shape[1]).to(device)
+    # print(H.shape)
+    # print(input_tensor.shape)
+
+    input_tensors = torch.split(input_tensor, split_size_or_sections=int(input_tensor.shape[0]/nsamples), dim=0)
+    tmp = 0
+
+    for inp in input_tensors:
+        inp = inp.t()
+        inp = math.sqrt(2/(tmp+1)) * inp.float()
+        H *= tmp/(tmp + 1)
+        tmp += 1
+        H += inp.matmul(inp.t())
+        
+        
+    # H = H.double()
+    dead = torch.diag(H) == 0
+    H[dead, dead] = 1
+    weight_tensor[:, dead] = 0
+
+    # Losses = torch.zeros(rows,columns)
+    
+    damp = percdamp * torch.mean(torch.diag(H))
+    diag = torch.arange(columns, device=device)
+
+    H[diag, diag] += damp
+    H = torch.linalg.cholesky(H)
+    H = torch.cholesky_inverse(H)
+    H = torch.linalg.cholesky(H, upper=True)
+
+    if dtype == torch.bfloat16:
+        Hinv = H.bfloat16()
+    else:
+        Hinv = H
+
+
+    mask = None
+
+    for i1 in range(0, columns, blocksize):
+        i2 = min(i1 + blocksize, columns)
+        count = i2 - i1
+
+        W1 = weight_tensor[:,i1:i2].clone()
+        Q1 = torch.zeros_like(W1)
+        Err1 = torch.zeros_like(W1)
+        # Losses1 = torch.zeros_like(W1)
+        Hinv1 = Hinv[i1:i2, i1:i2]
+
+
+        if prune_n == 0:
+            if mask is not None:
+                mask1 = mask[:, i1:i2]
+            else:
+                tmp = W1 ** 2 / (torch.diag(Hinv1).reshape((1,-1))**2)
+                thresh = torch.sort(tmp.flatten())[0][int(tmp.numel()*sparsity_ratio)]
+                mask1 = tmp <= thresh
+        else:
+            mask1 = torch.zeros_like(W1) == 1
+
+        for i in range(count):
+            w = W1[:,i]
+            d = Hinv1[i,i]
+
+            if prune_n != 0 and i % prune_m == 0:
+                tmp = W1[:, i:(i + prune_m)] ** 2 / (torch.diag(Hinv1)[i:(i + prune_m)].reshape((1, -1))) ** 2
+                mask1.scatter_(1, i + torch.topk(tmp, prune_n, dim=1, largest=False)[1], True)
+            
+            q = w.clone()
+            if A == False:
+                q[mask1[:,i]] = 0    
+            else:
+                q[mask1[:,i]] = 0  
+                # q[mask1[:,i]] = float('-inf') 
+
+            Q1[:, i] = q
+            # Losses1[:, i] = (w - q) ** 2 / d ** 2
+            q[mask1[:,i]] = 0 
+            err1 = (w - q) / d
+            W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+            Err1[:, i] = err1
+
+        weight_tensor[:, i1:i2] = Q1
+        # print(Losses.shape)
+        # print(Losses1.shape)
+        # Losses += torch.sum(Losses1, 1) / 2      
+
+        weight_tensor[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+    torch.cuda.synchronize()
+    del H, Hinv, mask1, mask, tmp, w, d, q, err1, Err1, Q1, W1
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
+    return weight_tensor

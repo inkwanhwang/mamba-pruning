@@ -1,7 +1,7 @@
 import torch
 import gc
 
-def wanda(input_tensor, weight_tensor, sparsity_ratio, prune_n, A = False):
+def wanda(input_tensor, weight_tensor, sparsity_ratio, prune_n):
     prune_m = prune_n * 2
     result_tensor = weight_tensor
     l2_norm_tensor = torch.norm(input_tensor, p=2, dim=0) / input_tensor.shape[0] 

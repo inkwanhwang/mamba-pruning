@@ -12,11 +12,12 @@ params:
   device_num: 'cuda:3'
   dtype: bfloat16
 prune:
+  prune_opt: sparsegpt
   prune_in_proj: True
   prune_conv1d: True
   prune_x_proj: True
   prune_dt_proj: True
   prune_A_log: True
   prune_out_proj: True
-  ssm_state: None
+  ssm_state: null
   prune_n: 0

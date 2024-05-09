@@ -11,6 +11,7 @@ import gc
 from mamba.mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 from lib.data import get_loaders
 from pruner.wanda import wanda
+from pruner.sparsegpt import sparsegpt
 try:
     from causal_conv1d import causal_conv1d_fn
 except ImportError:
@@ -31,6 +32,7 @@ dtype = config.params.dtype
 seed = config.params.seed
 device_num = config.params.device_num
 
+prune_opt = config.prune.prune_opt
 prune_in_proj = config.prune.prune_in_proj
 prune_conv1d = config.prune.prune_conv1d
 prune_x_proj = config.prune.prune_x_proj
@@ -112,7 +114,8 @@ for i in range(layer_num):
         norm_cls.weight = nn.Parameter(model_weights[norm_weights[i]])
         normalized_hidden_input = norm_cls(hidden_state)
         if prune_in_proj == True:
-            model_weights[in_proj_weights[i]] = wanda(rearrange(normalized_hidden_input,"b l d -> (b l) d"), model_weights[in_proj_weights[i]],sparsity_ratio, prune_n)
+            # model_weights[in_proj_weights[i]] = wanda(rearrange(normalized_hidden_input,"b l d -> (b l) d"), model_weights[in_proj_weights[i]],sparsity_ratio, prune_n)
+            model_weights[in_proj_weights[i]] = sparsegpt(input_tensor=rearrange(normalized_hidden_input,"b l d -> (b l) d"), weight_tensor= model_weights[in_proj_weights[i]],sparsity_ratio=sparsity_ratio,prune_n=prune_n, device=device, dtype=dtype, nsamples=nsamples)
         gc.collect()
         torch.cuda.empty_cache()
 
@@ -120,39 +123,51 @@ for i in range(layer_num):
         x, z = xz.chunk(2, dim=2)
         model_weights[conv1d_weights[i]] = rearrange(model_weights[conv1d_weights[i]], "b l d -> (b l) d")
         if prune_conv1d == True:
-            model_weights[conv1d_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[conv1d_weights[i]].T, sparsity_ratio, prune_n)
+            # model_weights[conv1d_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[conv1d_weights[i]].T, sparsity_ratio, prune_n)
+            model_weights[conv1d_weights[i]] = sparsegpt(input_tensor=rearrange(x, "b l d -> (b l) d"), weight_tensor=model_weights[conv1d_weights[i]].T, sparsity_ratio=sparsity_ratio, prune_n=prune_n, device=device, dtype=dtype, nsamples=nsamples)
             model_weights[conv1d_weights[i]] = model_weights[conv1d_weights[i]].T
         gc.collect()
         torch.cuda.empty_cache()
 
-        x = causal_conv1d_fn(x = rearrange(x, "b l d -> b d l"), weight = model_weights[conv1d_weights[i]], bias = model_weights[conv1d_bias[i]], activation = "silu",)
+        x = causal_conv1d_fn(x=rearrange(x, "b l d -> b d l"), weight=model_weights[conv1d_weights[i]], bias=model_weights[conv1d_bias[i]], activation="silu",)
         x = rearrange(x, "b d l -> b l d")
         if prune_x_proj == True:
-            model_weights[x_proj_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[x_proj_weights[i]], sparsity_ratio, prune_n)
+            # model_weights[x_proj_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[x_proj_weights[i]], sparsity_ratio, prune_n)
+            model_weights[x_proj_weights[i]] = sparsegpt(input_tensor=rearrange(x, "b l d -> (b l) d"), weight_tensor=model_weights[x_proj_weights[i]], sparsity_ratio=sparsity_ratio, prune_n=prune_n, device=device, dtype=dtype, nsamples=nsamples)
         gc.collect()
         torch.cuda.empty_cache()
 
         x_dbl = x @ model_weights[x_proj_weights[i]].T
         dt, B, C = torch.split(x_dbl, [dt_rank, d_state, d_state], dim=-1)
         if prune_dt_proj == True:
-            model_weights[dt_proj_weights[i]] = wanda(rearrange(dt, "b l d -> (b l) d"), model_weights[dt_proj_weights[i]], sparsity_ratio, prune_n)
+            # model_weights[dt_proj_weights[i]] = wanda(rearrange(dt, "b l d -> (b l) d"), model_weights[dt_proj_weights[i]], sparsity_ratio, prune_n)
+            model_weights[dt_proj_weights[i]] = sparsegpt(input_tensor=rearrange(dt, "b l d -> (b l) d"), weight_tensor=model_weights[dt_proj_weights[i]], sparsity_ratio=sparsity_ratio, prune_n=prune_n, device=device, dtype=dtype, nsamples=nsamples)
         gc.collect()
         torch.cuda.empty_cache()
 
         dt = dt @ model_weights[dt_proj_weights[i]].T
         A = -torch.exp(model_weights[A_log_weights[i]].float())
+       
+        if prune_opt == 'sparsegpt':
+            A = A.bfloat16()
+
         if prune_A_log == True:
             dt_act = F.softplus(dt)
-            A = wanda(rearrange(dt_act, "b l d -> (b l) d"), A.T, sparsity_ratio, prune_n, A=True)
+            # import ipdb
+            # ipdb.set_trace()
+            # A = wanda(rearrange(dt_act, "b l d -> (b l) d"), A.T, sparsity_ratio, prune_n)
+            A = sparsegpt(input_tensor=rearrange(dt_act, "b l d -> (b l) d"), weight_tensor=A.T, sparsity_ratio=sparsity_ratio, prune_n=prune_n, device=device, A=True, dtype=dtype, nsamples=nsamples)
             A = A.T
+            A[A>0] = 0
             model_weights[A_log_weights[i]] = torch.log(-A)
+            A = A.float()
         dt = rearrange(dt, "b l d -> b d l", l=seqlen)
         B = rearrange(B, "b l dstate -> b dstate l", l=seqlen).contiguous()
         C = rearrange(C, "b l dstate -> b dstate l", l=seqlen).contiguous()
         gc.collect()
         torch.cuda.empty_cache()
 
-        y, _ = selective_scan_fn(
+        y = selective_scan_fn(
             rearrange(x, "b l d -> b d l", l = seqlen),
             dt,
             A,
@@ -160,18 +175,23 @@ for i in range(layer_num):
             C,
             model_weights[D[i]].float(),
             z=rearrange(z, "b l d -> b d l", l = seqlen),
-            delta_bias= model_weights[dt_proj_bias[i]].float(),
-            delta_softplus=True,
-            return_last_state=ssm_state is not None,)
+            delta_bias = model_weights[dt_proj_bias[i]].float(),
+            delta_softplus = True,
+            return_last_state = ssm_state is not None,
+        )
         y = rearrange(y, "b d l -> b l d")
         if prune_out_proj == True:
-            model_weights[out_proj_weights[i]] = wanda(rearrange(y,"b l d -> (b l) d"), model_weights[out_proj_weights[i]], sparsity_ratio, prune_n)
+            # model_weights[out_proj_weights[i]] = wanda(rearrange(y,"b l d -> (b l) d"), model_weights[out_proj_weights[i]], sparsity_ratio, prune_n)
+            model_weights[out_proj_weights[i]] = sparsegpt(input_tensor=rearrange(y,"b l d -> (b l) d"), weight_tensor=model_weights[out_proj_weights[i]], sparsity_ratio=sparsity_ratio, prune_n=prune_n,device=device, dtype=dtype, nsamples=nsamples)
         out = y @ model_weights[out_proj_weights[i]].T
+
+        hidden_state = out
+        prev_residual = residual
+
         gc.collect()
         torch.cuda.empty_cache()
         
-        hidden_state = out
-        prev_residual = residual
+        
 
         print(f'layer {i} pruning complete', i)
 
