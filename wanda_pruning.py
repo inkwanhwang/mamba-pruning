@@ -17,9 +17,7 @@ from config import load_config
 import gc
 from mamba.mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn
 from lib.data import get_loaders
-
-import ipdb
-ipdb.set_trace()
+from pruner.wanda import wanda
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -63,28 +61,6 @@ class TokenizerWrapper:
     def __init__(self, input_ids):
         self.input_ids = input_ids
 
-def wanda(input_tensor, weight_tensor, sparsity_ratio, prune_n, A = False):
-    prune_m = prune_n * 2
-    result_tensor = weight_tensor
-    l2_norm_tensor = torch.norm(input_tensor, p=2, dim=0) / input_tensor.shape[0] 
-    l2_norm_tensor = l2_norm_tensor.unsqueeze(1).expand_as(weight_tensor.T)
-    wanda_tensor = torch.abs(weight_tensor) * l2_norm_tensor.T
-
-    if prune_n != 0:
-        weight_mask = (torch.zeros_like(wanda_tensor)==1)
-        for ii in range(wanda_tensor.shape[1]):
-            if ii % prune_m == 0:
-                tmp = wanda_tensor[:,ii:(ii+4)].float()
-                weight_mask.scatter_(1,ii+torch.topk(tmp, 2, dim=1, largest= False)[1], True) #smallest in tmp만 출력한다! [0]은 숫자 [1]은 위치를 나타낸다!
-    else:
-        thresh = torch.sort(wanda_tensor.flatten().cuda())[0][int(wanda_tensor.numel()*sparsity_ratio)].cpu()
-        weight_mask = (wanda_tensor<=thresh)
-    
-    result_tensor[weight_mask] = 0
-    gc.collect()
-    torch.cuda.empty_cache()
-    return result_tensor
-
 tokenizer = AutoTokenizer.from_pretrained("EleutherAI/gpt-neox-20b")
 if model_param != "7b":
     model = MambaLMHeadModel.from_pretrained(os.path.expanduser(config.paths.model_address), device=device_num, dtype=dtype)
@@ -92,12 +68,8 @@ else:
     model = MambaForCausalLM.from_pretrained("tri-ml/mamba-7b-rw").bfloat16().to(device_num)
     
 device = torch.device(device_num)
-import ipdb
-ipdb.set_trace()
 # Load and process c4 dataset
-print("loading calibdation data")
 dataloader, _ = get_loaders("c4",nsamples=nsamples,seed=seed,seqlen=seqlen,tokenizer=tokenizer)
-print("dataset loading complete")
 input_ids = dataloader.to(device)
 model_weights = model.state_dict()
 
@@ -134,16 +106,11 @@ mixer_dt_proj_bias=['backbone.layers.{0}.mixer.dt_proj.bias'.format(i) for i in 
 mixer_x_proj_weights=['backbone.layers.{0}.mixer.x_proj.weight'.format(i) for i in range(layer_num)]
 norm_weights = ['backbone.layers.{0}.norm.weight'.format(i) for i in range(layer_num)]
 mixer_D = ['backbone.layers.{0}.mixer.D'.format(i) for i in range(layer_num)]
-
-if model_param != "7b":
-    embedding_layer = nn.Embedding.from_pretrained(model_weights['backbone.embedding.weight'])
-else:
-    embedding_layer = nn.Embedding.from_pretrained(model_weights['backbone.embeddings.weight'])
+embedding_layer = nn.Embedding.from_pretrained(model_weights['backbone.embedding.weight']) if model_param != "7b" else nn.Embedding.from_pretrained(model_weights['backbone.embeddings.weight'])
 embedded_input = embedding_layer(input_ids)
 
 hidden_state = embedded_input
 prev_residual = torch.empty(nsamples,seqlen,d_model).to(device=device_num)
-print(prev_residual.shape)
 norm_cls = RMSNorm(hidden_size=d_model, device=device, dtype=dtype)
 
 for i in range(layer_num):
