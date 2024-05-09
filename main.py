@@ -88,16 +88,16 @@ d_state = 16
 dt_rank = model_weights['backbone.layers.0.mixer.x_proj.weight'].shape[0] - d_state*2
 d_inner = d_model * 2
 
-mixer_in_proj_weights = [f'backbone.layers.{i}.mixer.in_proj.weight' for i in range(layer_num)]
-mixer_out_proj_weights = [f'backbone.layers.{i}.mixer.out_proj.weight' for i in range(layer_num)]
-mixer_A_log_weights=[f'backbone.layers.{i}.mixer.A_log' for i in range(layer_num)]         
-mixer_conv1d_weights=[f'backbone.layers.{i}.mixer.conv1d.weight' for i in range (layer_num)]
-mixer_conv1d_bias=[f'backbone.layers.{i}.mixer.conv1d.bias' for i in range (layer_num)]
-mixer_dt_proj_weights=[f'backbone.layers.{i}.mixer.dt_proj.weight' for i in range(layer_num)]
-mixer_dt_proj_bias=[f'backbone.layers.{i}.mixer.dt_proj.bias' for i in range(layer_num)]
-mixer_x_proj_weights=[f'backbone.layers.{i}.mixer.x_proj.weight' for i in range(layer_num)]
+in_proj_weights = [f'backbone.layers.{i}.mixer.in_proj.weight' for i in range(layer_num)]
+out_proj_weights = [f'backbone.layers.{i}.mixer.out_proj.weight' for i in range(layer_num)]
+A_log_weights=[f'backbone.layers.{i}.mixer.A_log' for i in range(layer_num)]         
+conv1d_weights=[f'backbone.layers.{i}.mixer.conv1d.weight' for i in range (layer_num)]
+conv1d_bias=[f'backbone.layers.{i}.mixer.conv1d.bias' for i in range (layer_num)]
+dt_proj_weights=[f'backbone.layers.{i}.mixer.dt_proj.weight' for i in range(layer_num)]
+dt_proj_bias=[f'backbone.layers.{i}.mixer.dt_proj.bias' for i in range(layer_num)]
+x_proj_weights=[f'backbone.layers.{i}.mixer.x_proj.weight' for i in range(layer_num)]
 norm_weights = [f'backbone.layers.{i}.norm.weight' for i in range(layer_num)]
-mixer_D = [f'backbone.layers.{i}.mixer.D' for i in range(layer_num)]
+D = [f'backbone.layers.{i}.mixer.D' for i in range(layer_num)]
 embedding_layer = nn.Embedding.from_pretrained(model_weights['backbone.embedding.weight']) if model_param != "7b" else nn.Embedding.from_pretrained(model_weights['backbone.embeddings.weight'])
 embedded_input = embedding_layer(input_ids)
 
@@ -112,40 +112,40 @@ for i in range(layer_num):
         norm_cls.weight = nn.Parameter(model_weights[norm_weights[i]])
         normalized_hidden_input = norm_cls(hidden_state)
         if prune_in_proj == True:
-            model_weights[mixer_in_proj_weights[i]] = wanda(rearrange(normalized_hidden_input,"b l d -> (b l) d"), model_weights[mixer_in_proj_weights[i]],sparsity_ratio, prune_n)
+            model_weights[in_proj_weights[i]] = wanda(rearrange(normalized_hidden_input,"b l d -> (b l) d"), model_weights[in_proj_weights[i]],sparsity_ratio, prune_n)
         gc.collect()
         torch.cuda.empty_cache()
 
-        xz = normalized_hidden_input @ model_weights[mixer_in_proj_weights[i]].T
+        xz = normalized_hidden_input @ model_weights[in_proj_weights[i]].T
         x, z = xz.chunk(2, dim=2)
-        model_weights[mixer_conv1d_weights[i]] = rearrange(model_weights[mixer_conv1d_weights[i]], "b l d -> (b l) d")
+        model_weights[conv1d_weights[i]] = rearrange(model_weights[conv1d_weights[i]], "b l d -> (b l) d")
         if prune_conv1d == True:
-            model_weights[mixer_conv1d_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[mixer_conv1d_weights[i]].T, sparsity_ratio, prune_n)
-            model_weights[mixer_conv1d_weights[i]] = model_weights[mixer_conv1d_weights[i]].T
+            model_weights[conv1d_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[conv1d_weights[i]].T, sparsity_ratio, prune_n)
+            model_weights[conv1d_weights[i]] = model_weights[conv1d_weights[i]].T
         gc.collect()
         torch.cuda.empty_cache()
 
-        x = causal_conv1d_fn(x = rearrange(x, "b l d -> b d l"), weight = model_weights[mixer_conv1d_weights[i]], bias = model_weights[mixer_conv1d_bias[i]], activation = "silu",)
+        x = causal_conv1d_fn(x = rearrange(x, "b l d -> b d l"), weight = model_weights[conv1d_weights[i]], bias = model_weights[conv1d_bias[i]], activation = "silu",)
         x = rearrange(x, "b d l -> b l d")
         if prune_x_proj == True:
-            model_weights[mixer_x_proj_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[mixer_x_proj_weights[i]], sparsity_ratio, prune_n)
+            model_weights[x_proj_weights[i]] = wanda(rearrange(x, "b l d -> (b l) d"), model_weights[x_proj_weights[i]], sparsity_ratio, prune_n)
         gc.collect()
         torch.cuda.empty_cache()
 
-        x_dbl = x @ model_weights[mixer_x_proj_weights[i]].T
+        x_dbl = x @ model_weights[x_proj_weights[i]].T
         dt, B, C = torch.split(x_dbl, [dt_rank, d_state, d_state], dim=-1)
         if prune_dt_proj == True:
-            model_weights[mixer_dt_proj_weights[i]] = wanda(rearrange(dt, "b l d -> (b l) d"), model_weights[mixer_dt_proj_weights[i]], sparsity_ratio, prune_n)
+            model_weights[dt_proj_weights[i]] = wanda(rearrange(dt, "b l d -> (b l) d"), model_weights[dt_proj_weights[i]], sparsity_ratio, prune_n)
         gc.collect()
         torch.cuda.empty_cache()
 
-        dt = dt @ model_weights[mixer_dt_proj_weights[i]].T
-        A = -torch.exp(model_weights[mixer_A_log_weights[i]].float())
+        dt = dt @ model_weights[dt_proj_weights[i]].T
+        A = -torch.exp(model_weights[A_log_weights[i]].float())
         if prune_A_log == True:
             dt_act = F.softplus(dt)
             A = wanda(rearrange(dt_act, "b l d -> (b l) d"), A.T, sparsity_ratio, prune_n, A=True)
             A = A.T
-            model_weights[mixer_A_log_weights[i]] = torch.log(-A)
+            model_weights[A_log_weights[i]] = torch.log(-A)
         dt = rearrange(dt, "b l d -> b d l", l=seqlen)
         B = rearrange(B, "b l dstate -> b dstate l", l=seqlen).contiguous()
         C = rearrange(C, "b l dstate -> b dstate l", l=seqlen).contiguous()
@@ -158,15 +158,15 @@ for i in range(layer_num):
             A,
             B,
             C,
-            model_weights[mixer_D[i]].float(),
+            model_weights[D[i]].float(),
             z=rearrange(z, "b l d -> b d l", l = seqlen),
-            delta_bias= model_weights[mixer_dt_proj_bias[i]].float(),
+            delta_bias= model_weights[dt_proj_bias[i]].float(),
             delta_softplus=True,
             return_last_state=ssm_state is not None,)
         y = rearrange(y, "b d l -> b l d")
         if prune_out_proj == True:
-            model_weights[mixer_out_proj_weights[i]] = wanda(rearrange(y,"b l d -> (b l) d"), model_weights[mixer_out_proj_weights[i]], sparsity_ratio, prune_n)
-        out = y @ model_weights[mixer_out_proj_weights[i]].T
+            model_weights[out_proj_weights[i]] = wanda(rearrange(y,"b l d -> (b l) d"), model_weights[out_proj_weights[i]], sparsity_ratio, prune_n)
+        out = y @ model_weights[out_proj_weights[i]].T
         gc.collect()
         torch.cuda.empty_cache()
         
